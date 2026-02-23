@@ -467,12 +467,45 @@ public class IndicesQueryCache implements QueryCache, Closeable {
             if (isCostly(query)) {
                 return minFrequencyForCostly;
             }
-            int minFrequency = this.minFrequency;
-            if (query instanceof BooleanQuery || query instanceof DisjunctionMaxQuery) {
-                --minFrequency;
+
+            int minFrequency = this.minFrequency + queryComplexityAdjustment(query);
+            return Math.max(1, minFrequency);
+        }
+
+        /**
+         * Adjust cache admission threshold by query complexity.
+         * Complex boolean/disjunction queries tend to allocate larger cached structures,
+         * so they must be observed more times before being cached.
+         */
+        private int queryComplexityAdjustment(Query query) {
+            if (query instanceof BooleanQuery) {
+                final int clauses = ((BooleanQuery) query).clauses().size();
+                if (clauses >= 8) {
+                    return 2;
+                }
+                if (clauses >= 4) {
+                    return 1;
+                }
+                if (clauses <= 2) {
+                    return -1;
+                }
+                return 0;
             }
 
-            return Math.max(1, minFrequency);
+            if (query instanceof DisjunctionMaxQuery) {
+                final int disjuncts = ((DisjunctionMaxQuery) query).getDisjuncts().size();
+                if (disjuncts >= 6) {
+                    return 2;
+                }
+                if (disjuncts >= 3) {
+                    return 1;
+                }
+                if (disjuncts <= 2) {
+                    return -1;
+                }
+            }
+
+            return 0;
         }
 
         /**

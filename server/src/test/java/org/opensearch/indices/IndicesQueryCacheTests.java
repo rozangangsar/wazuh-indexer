@@ -43,6 +43,7 @@ import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.ConstantScoreScorer;
 import org.apache.lucene.search.ConstantScoreWeight;
+import org.apache.lucene.search.DisjunctionMaxQuery;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.IndexSearcher;
@@ -580,6 +581,52 @@ public class IndicesQueryCacheTests extends OpenSearchTestCase {
         IOUtils.close(r, dir);
         cache.onClose(shard);
         cache.close(); // this triggers some assertions
+    }
+
+    public void testComplexQueryNeedsHigherFrequencyToCache() {
+        Settings settings = Settings.builder().build();
+        OpenseachUsageTrackingQueryCachingPolicy queryCachingPolicy = new OpenseachUsageTrackingQueryCachingPolicy(
+            new ClusterSettings(settings, ClusterSettings.BUILT_IN_CLUSTER_SETTINGS)
+        );
+        queryCachingPolicy.setMinFrequency(5);
+
+        // Small boolean queries keep the old discount behavior.
+        BooleanQuery.Builder smallBoolean = new BooleanQuery.Builder();
+        smallBoolean.add(new TermQuery(new Term("name", "a")), BooleanClause.Occur.FILTER);
+        smallBoolean.add(new TermQuery(new Term("name", "b")), BooleanClause.Occur.FILTER);
+        assertEquals(4, queryCachingPolicy.minFrequencyToCache(smallBoolean.build()));
+
+        // Medium and large boolean queries become more selective.
+        BooleanQuery.Builder mediumBoolean = new BooleanQuery.Builder();
+        for (int i = 0; i < 4; i++) {
+            mediumBoolean.add(new TermQuery(new Term("name", "m" + i)), BooleanClause.Occur.SHOULD);
+        }
+        assertEquals(6, queryCachingPolicy.minFrequencyToCache(mediumBoolean.build()));
+
+        BooleanQuery.Builder largeBoolean = new BooleanQuery.Builder();
+        for (int i = 0; i < 8; i++) {
+            largeBoolean.add(new TermQuery(new Term("name", "l" + i)), BooleanClause.Occur.SHOULD);
+        }
+        assertEquals(7, queryCachingPolicy.minFrequencyToCache(largeBoolean.build()));
+
+        DisjunctionMaxQuery smallDisjunction = new DisjunctionMaxQuery(
+            List.of(new TermQuery(new Term("name", "x")), new TermQuery(new Term("name", "y"))),
+            0.1f
+        );
+        assertEquals(4, queryCachingPolicy.minFrequencyToCache(smallDisjunction));
+
+        DisjunctionMaxQuery largeDisjunction = new DisjunctionMaxQuery(
+            List.of(
+                new TermQuery(new Term("name", "d1")),
+                new TermQuery(new Term("name", "d2")),
+                new TermQuery(new Term("name", "d3")),
+                new TermQuery(new Term("name", "d4")),
+                new TermQuery(new Term("name", "d5")),
+                new TermQuery(new Term("name", "d6"))
+            ),
+            0.1f
+        );
+        assertEquals(7, queryCachingPolicy.minFrequencyToCache(largeDisjunction));
     }
 
     public void testCostlyMinFrequencyToCache() throws IOException {
