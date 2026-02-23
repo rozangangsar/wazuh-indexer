@@ -1,0 +1,151 @@
+WAZUH INDEXER RAM OPTIMIZATION - QUERY CACHE ADMISSION
+======================================================
+
+Tujuan
+------
+Dokumen ini menjelaskan:
+1) Kode apa yang diubah untuk optimasi RAM.
+2) Metode yang dipakai (bukan sekadar tuning limit runtime).
+3) Langkah setup build, deploy, verifikasi, dan rollback.
+
+Ringkasan Perubahan Kode
+------------------------
+Perubahan dilakukan di 2 file:
+
+1. server/src/main/java/org/opensearch/indices/IndicesQueryCache.java
+   Kelas: OpenseachUsageTrackingQueryCachingPolicy
+
+   Sebelum perubahan:
+   - Query tipe BooleanQuery atau DisjunctionMaxQuery selalu mendapat diskon
+     threshold cache (minFrequency - 1), tanpa melihat kompleksitas query.
+
+   Sesudah perubahan:
+   - Ditambahkan metode baru: queryComplexityAdjustment(Query query)
+   - Mekanisme threshold cache jadi adaptif berdasarkan kompleksitas query:
+
+     BooleanQuery:
+     - clauses <= 2  : adjustment -1 (lebih mudah masuk cache)
+     - clauses >= 4  : adjustment +1
+     - clauses >= 8  : adjustment +2 (lebih selektif)
+
+     DisjunctionMaxQuery:
+     - disjuncts <= 2: adjustment -1
+     - disjuncts >= 3: adjustment +1
+     - disjuncts >= 6: adjustment +2
+
+   - Rumus baru non-costly query:
+     minFrequencyToCache = max(1, baseMinFrequency + queryComplexityAdjustment)
+
+   Dampak yang diharapkan:
+   - Query kompleks tidak cepat memenuhi syarat untuk dicache.
+   - Alokasi memory cache untuk query berat berkurang.
+   - Query sederhana tetap responsif karena masih mudah dicache.
+
+2. server/src/test/java/org/opensearch/indices/IndicesQueryCacheTests.java
+   - Menambahkan test: testComplexQueryNeedsHigherFrequencyToCache()
+   - Menambah import DisjunctionMaxQuery
+
+   Validasi test:
+   - Query kecil -> threshold tetap rendah
+   - Query sedang/besar -> threshold lebih tinggi
+   - Memastikan behavior baru konsisten dan aman terhadap regresi
+
+Metode Optimasi yang Dipakai
+----------------------------
+Pendekatan ini adalah optimasi admission policy cache berbasis kompleksitas query,
+bukan mengurangi heap secara paksa.
+
+Kenapa metode ini dipilih:
+- Lebih aman untuk performa daripada sekadar mengecilkan heap/cache limit.
+- Menurunkan pressure RAM dari query cache yang mahal.
+- Relevan untuk workload Wazuh skala kecil-menengah (sekitar 8-10 VM agent)
+  yang umumnya memiliki pola query campuran.
+
+Prasyarat Setup
+---------------
+- Repository fork wazuh-indexer sudah di-clone.
+- Java 21 terpasang.
+- Akses sudo untuk deploy artifact ke instalasi wazuh-indexer.
+
+Cek prasyarat cepat:
+- java -version
+- echo $JAVA_HOME
+
+Contoh JAVA_HOME yang valid:
+- /usr/lib/jvm/java-21-openjdk-amd64
+
+Langkah Build
+-------------
+1) Masuk repo:
+   cd ~/wazuh-dev/wazuh-indexer
+
+2) Checkout branch optimasi:
+   git checkout feat/indexer-memory-opt
+
+3) Build distribusi linux tar:
+   ./gradlew :distribution:archives:linux-tar:assemble --no-daemon
+
+   Catatan:
+   - Warning deprecation atau warning annotation pada dependency pihak ketiga
+     dapat muncul dan umumnya non-fatal selama status akhirnya BUILD SUCCESSFUL.
+
+Langkah Deploy (Metode Aman: Backup + Replace JAR server)
+----------------------------------------------------------
+1) Cari jar hasil build yang berisi class yang diubah:
+   NEW_JAR=$(find server/build -type f -name "*.jar" | while read f; do
+     jar tf "$f" 2>/dev/null | grep -q "org/opensearch/indices/IndicesQueryCache.class" && echo "$f"
+   done | head -n1)
+
+2) Cari jar server yang aktif di instalasi:
+   CUR_JAR=$(find /usr/share/wazuh-indexer/lib -maxdepth 1 -type f -name "opensearch-*.jar" | head -n1)
+
+3) Backup jar aktif:
+   TS=$(date +%Y%m%d-%H%M%S)
+   sudo cp "$CUR_JAR" "${CUR_JAR}.bak-${TS}"
+
+4) Replace jar:
+   sudo cp "$NEW_JAR" "$CUR_JAR"
+   sudo chown root:wazuh "$CUR_JAR"
+   sudo chmod 0644 "$CUR_JAR"
+
+5) Restart service:
+   sudo systemctl restart wazuh-indexer
+   sudo systemctl status wazuh-indexer --no-pager -l
+
+Langkah Verifikasi Dampak RAM
+-----------------------------
+Gunakan metrik process + JVM, jangan hanya melihat buff/cache OS.
+
+1) RSS process terbesar:
+   ps -eo pid,ppid,cmd,%mem,%cpu,rss,vsz --sort=-rss | head -n 20
+
+2) Statistik JVM node:
+   curl -s localhost:9200/_nodes/stats/jvm?pretty
+
+3) Memori sistem:
+   free -h
+
+Interpretasi yang benar:
+- Fokus utama: RSS proses wazuh-indexer dan jvm heap used.
+- Buff/cache Linux bisa naik/turun dinamis dan tidak selalu berarti aplikasi boros.
+
+Rollback
+--------
+Jika ingin kembali ke versi sebelum optimasi:
+1) Restore backup jar:
+   sudo cp "${CUR_JAR}.bak-<timestamp>" "$CUR_JAR"
+   sudo chown root:wazuh "$CUR_JAR"
+   sudo chmod 0644 "$CUR_JAR"
+
+2) Restart:
+   sudo systemctl restart wazuh-indexer
+
+Commit Referensi
+----------------
+Commit optimasi kode:
+- 08ca5a123b1
+  "Tune query cache admission by query complexity"
+
+Isi commit dokumentasi ini:
+- Penjelasan setup, metode, file perubahan, deploy, verifikasi, rollback.
+
