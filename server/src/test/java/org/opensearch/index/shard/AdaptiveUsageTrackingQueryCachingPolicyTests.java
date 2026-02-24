@@ -71,6 +71,51 @@ public class AdaptiveUsageTrackingQueryCachingPolicyTests extends OpenSearchTest
         assertTrue(adaptive.freq(large) > adaptive.freq(small));
     }
 
+    public void testVeryLargeQueriesAreMostSelective() {
+        ExposedAdaptivePolicy adaptive = new ExposedAdaptivePolicy();
+
+        BooleanQuery.Builder largeBoolean = new BooleanQuery.Builder();
+        for (int i = 0; i < 8; i++) {
+            largeBoolean.add(new TermQuery(new Term("name", "lb" + i)), BooleanClause.Occur.SHOULD);
+        }
+
+        BooleanQuery.Builder veryLargeBoolean = new BooleanQuery.Builder();
+        for (int i = 0; i < 16; i++) {
+            veryLargeBoolean.add(new TermQuery(new Term("name", "vb" + i)), BooleanClause.Occur.SHOULD);
+        }
+
+        DisjunctionMaxQuery largeDisjunction = new DisjunctionMaxQuery(
+            List.of(
+                new TermQuery(new Term("name", "d1")),
+                new TermQuery(new Term("name", "d2")),
+                new TermQuery(new Term("name", "d3")),
+                new TermQuery(new Term("name", "d4")),
+                new TermQuery(new Term("name", "d5")),
+                new TermQuery(new Term("name", "d6"))
+            ),
+            0.1f
+        );
+
+        DisjunctionMaxQuery veryLargeDisjunction = new DisjunctionMaxQuery(
+            List.of(
+                new TermQuery(new Term("name", "e1")),
+                new TermQuery(new Term("name", "e2")),
+                new TermQuery(new Term("name", "e3")),
+                new TermQuery(new Term("name", "e4")),
+                new TermQuery(new Term("name", "e5")),
+                new TermQuery(new Term("name", "e6")),
+                new TermQuery(new Term("name", "e7")),
+                new TermQuery(new Term("name", "e8")),
+                new TermQuery(new Term("name", "e9")),
+                new TermQuery(new Term("name", "e10"))
+            ),
+            0.1f
+        );
+
+        assertTrue(adaptive.freq(veryLargeBoolean.build()) > adaptive.freq(largeBoolean.build()));
+        assertTrue(adaptive.freq(veryLargeDisjunction) > adaptive.freq(largeDisjunction));
+    }
+
     private static final class ExposedAdaptivePolicy extends IndexShard.AdaptiveUsageTrackingQueryCachingPolicy {
         int freq(Query query) {
             return minFrequencyToCache(query);

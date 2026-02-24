@@ -556,6 +556,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
         private int queryComplexityAdjustment(Query query) {
             if (query instanceof BooleanQuery) {
                 final int clauses = ((BooleanQuery) query).clauses().size();
+                if (clauses >= 16) {
+                    return 4;
+                }
                 if (clauses >= 8) {
                     return 2;
                 }
@@ -567,6 +570,9 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
             if (query instanceof DisjunctionMaxQuery) {
                 final int disjuncts = ((DisjunctionMaxQuery) query).getDisjuncts().size();
+                if (disjuncts >= 10) {
+                    return 4;
+                }
                 if (disjuncts >= 6) {
                     return 2;
                 }
