@@ -43,6 +43,8 @@ import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.SegmentInfos;
 import org.apache.lucene.index.Term;
+import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.DisjunctionMaxQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryCachingPolicy;
 import org.apache.lucene.search.ReferenceManager;
@@ -474,7 +476,7 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
                 }
             };
         } else {
-            cachingPolicy = new UsageTrackingQueryCachingPolicy();
+            cachingPolicy = new AdaptiveUsageTrackingQueryCachingPolicy();
         }
         indexShardOperationPermits = new IndexShardOperationPermits(shardId, threadPool);
         readerWrapper = indexReaderWrapper;
@@ -537,6 +539,44 @@ public class IndexShard extends AbstractIndexShardComponent implements IndicesCl
 
     public Store remoteStore() {
         return this.remoteStore;
+    }
+
+    /**
+     * Keeps Lucene's baseline admission behavior but raises the threshold for
+     * complex boolean/disjunction queries that usually produce heavier cached
+     * structures.
+     */
+    static class AdaptiveUsageTrackingQueryCachingPolicy extends UsageTrackingQueryCachingPolicy {
+        @Override
+        protected int minFrequencyToCache(Query query) {
+            final int baseline = super.minFrequencyToCache(query);
+            return Math.max(1, baseline + queryComplexityAdjustment(query));
+        }
+
+        private int queryComplexityAdjustment(Query query) {
+            if (query instanceof BooleanQuery) {
+                final int clauses = ((BooleanQuery) query).clauses().size();
+                if (clauses >= 8) {
+                    return 2;
+                }
+                if (clauses >= 4) {
+                    return 1;
+                }
+                return 0;
+            }
+
+            if (query instanceof DisjunctionMaxQuery) {
+                final int disjuncts = ((DisjunctionMaxQuery) query).getDisjuncts().size();
+                if (disjuncts >= 6) {
+                    return 2;
+                }
+                if (disjuncts >= 3) {
+                    return 1;
+                }
+            }
+
+            return 0;
+        }
     }
 
     /**
